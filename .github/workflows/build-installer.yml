@@ -81,6 +81,9 @@ jobs:
           Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $zip
           $wintun = "$env:RUNNER_TEMP\wintun"
           Expand-Archive $zip $wintun -Force
+          # 诊断:wintun.zip 完整结构
+          Write-Host "=== wintun.zip 完整结构 ==="
+          Get-ChildItem $wintun -Recurse | ForEach-Object { Write-Host "  $($_.FullName.Replace($wintun,''))" }
 
           # 交互服务参数:openvpnserv.exe 裸跑(无参数)时默认就是交互服务
           # (service.c dispatchTable_shared → ServiceStartInteractive),
