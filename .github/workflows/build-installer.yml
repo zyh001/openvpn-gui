@@ -70,20 +70,31 @@ jobs:
           $x64Bin = Expand-Msi $am64 'x64'
           $x86Bin = Expand-Msi $ax86 'x86'
 
-          # 诊断:列出 MSI 解包目录里的 inf 文件(找 wintun 内核驱动)
-          Write-Host "MSI x64 解包目录 inf 文件:"
-          Get-ChildItem "$env:RUNNER_TEMP\ovpn-x64-extract" -Recurse -Filter *.inf -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
-          Write-Host "MSI x64 解包目录顶层结构:"
-          Get-ChildItem "$env:RUNNER_TEMP\ovpn-x64-extract" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { Write-Host "  [DIR] $($_.FullName)" }
+          # 安装官方 x64 MSI,让其把 wintun 内核驱动装进驱动库
+          # (msiexec /a 解包不执行驱动安装动作,且 MSI 文件表/解包目录都不含 wintun.inf)
+          Write-Host "安装官方 x64 MSI 以装入 wintun 驱动..."
+          $x64Msi = "$env:RUNNER_TEMP\ovpn-x64.msi"
+          Start-Process msiexec.exe "/i `"$x64Msi`" /qn /norestart" -Wait
+          # 从驱动库导出 wintun 驱动文件(inf/cat/sys)
+          $wintunDrv = $null
+          $repoRoot = Join-Path $env:SystemRoot 'System32\DriverStore\FileRepository'
+          $wintunDrvDir = Get-ChildItem $repoRoot -Directory -Filter 'wintun.inf_*' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($wintunDrvDir) {
+            $wintunDrv = "$env:RUNNER_TEMP\wintun-driver"
+            New-Item -ItemType Directory -Force -Path $wintunDrv | Out-Null
+            Copy-Item "$($wintunDrvDir.FullName)\*" $wintunDrv -Force
+            Write-Host "[OK] 从驱动库导出 wintun 驱动: $((Get-ChildItem $wintunDrv).Name -join ', ')"
+          } else {
+            Write-Warning "未在驱动库找到 wintun.inf 目录"
+          }
+          # 卸载官方 MSI(清理 runner)
+          Start-Process msiexec.exe "/x `"$x64Msi`" /qn /norestart" -Wait
 
-          # Wintun(amd64 + x86),单独下载解压
+          # Wintun 用户态库(amd64 + x86),单独下载解压
           $zip = "$env:RUNNER_TEMP\wintun.zip"
           Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $zip
           $wintun = "$env:RUNNER_TEMP\wintun"
           Expand-Archive $zip $wintun -Force
-          # 诊断:wintun.zip 完整结构
-          Write-Host "=== wintun.zip 完整结构 ==="
-          Get-ChildItem $wintun -Recurse | ForEach-Object { Write-Host "  $($_.FullName.Replace($wintun,''))" }
 
           # 交互服务参数:openvpnserv.exe 裸跑(无参数)时默认就是交互服务
           # (service.c dispatchTable_shared → ServiceStartInteractive),
@@ -99,6 +110,7 @@ jobs:
           $x64Bin | Out-File "$env:RUNNER_TEMP\x64Bin.txt" -Encoding utf8
           $x86Bin | Out-File "$env:RUNNER_TEMP\x86Bin.txt" -Encoding utf8
           $wintun | Out-File "$env:RUNNER_TEMP\wintun.txt" -Encoding utf8
+          if ($wintunDrv) { $wintunDrv | Out-File "$env:RUNNER_TEMP\wintunDrv.txt" -Encoding utf8 }
           "args=$svc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       # ---------------- 3. 组装 payload(x64 必做,x86 尽力而为)----------------
@@ -126,25 +138,26 @@ jobs:
             }
           }
 
-          # 内部函数:从 wintun 包里取对应架构的 wintun.dll 放进 bin,
-          # 同时把内核驱动文件(inf/cat/sys)放进 wintun-driver\<arch>\,
-          # 供安装时用 pnputil 装进驱动库(tapctl create --hwid wintun 依赖驱动已在驱动库)
+          # 内部函数:从 wintun 包取 wintun.dll 放进 bin,
+          # 从 CI 导出的驱动库目录取内核驱动(inf/cat/sys)放进 wintun-driver\,
+          # 供安装时 pnputil 装驱动库(tapctl create --hwid wintun 依赖驱动已在驱动库)
           function Add-Wintun($bin, $arch) {
             $pat = if ($arch -eq 'x64') { 'amd64' } else { '\\x86\\' }
             $d = Get-ChildItem $wintun -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $pat } | Select-Object -First 1
             if (-not $d) { throw "未找到 $arch wintun.dll" }
             Copy-Item $d.FullName "$bin\wintun.dll" -Force
 
-            # wintun 驱动文件(inf/cat/sys)与 wintun.dll 同目录(wintun.net 包结构:bin\<arch>\)
-            $drvDir = $d.Directory.FullName
-            Write-Host "wintun $arch 目录内容: $((Get-ChildItem $drvDir).Name -join ', ')"
-            $drvDst = "$bin\..\wintun-driver"
-            New-Item -ItemType Directory -Force -Path $drvDst | Out-Null
-            Copy-Item "$drvDir\wintun.inf", "$drvDir\wintun.cat", "$drvDir\wintun.sys" $drvDst -Force -ErrorAction SilentlyContinue
-            # 校验关键文件(诊断阶段:找不到只警告,不中止,以便输出 MSI 结构诊断)
-            $missing = @('wintun.inf','wintun.cat','wintun.sys') | Where-Object { -not (Test-Path "$drvDst\$_") }
-            if ($missing) { Write-Warning "wintun 驱动缺少: $($missing -join ', ')(目录 $drvDir);将依赖 MSI 内的驱动" }
-            else { Write-Host "[OK] $arch wintun 驱动文件已放入 $drvDst" }
+            # 内核驱动文件(仅 x64:CI 只安装了 x64 MSI 导出驱动)
+            if ($arch -eq 'x64' -and (Test-Path "$env:RUNNER_TEMP\wintunDrv.txt")) {
+              $drvSrc = (Get-Content "$env:RUNNER_TEMP\wintunDrv.txt" -Raw).Trim()
+              $drvDst = "$bin\..\wintun-driver"
+              New-Item -ItemType Directory -Force -Path $drvDst | Out-Null
+              Copy-Item "$drvSrc\*" $drvDst -Force
+              foreach ($f in @('wintun.inf','wintun.cat','wintun.sys')) {
+                if (-not (Test-Path "$drvDst\$f")) { throw "导出的 wintun 驱动缺少 $f" }
+              }
+              Write-Host "[OK] x64 wintun 内核驱动已放入 $drvDst"
+            }
           }
 
           # ---- x64(必做)----
@@ -244,10 +257,7 @@ jobs:
           # 校验 wintun 适配器已预创建(openvpn 连接前必须存在,否则报 "no adapters")
           $tap = & "C:\Program Files\JCUTVPN\bin\tapctl.exe" list --hwid wintun 2>$null
           Write-Host "wintun 适配器列表: $tap"
-          # 诊断阶段:tapctl create 输出(看是否因缺驱动失败)
-          $createOut = & "C:\Program Files\JCUTVPN\bin\tapctl.exe" create --hwid wintun --name JCUTVPN-Test 2>&1
-          Write-Host "tapctl create 测试输出: $createOut"
-          if (-not ($tap -match 'JCUTVPN')) { Write-Warning "wintun 适配器未创建(诊断阶段不中止):$createOut" }
+          if (-not ($tap -match 'JCUTVPN')) { throw "wintun 适配器校验失败:未找到 JCUTVPN(openvpn 会报 no adapters)" }
           Write-Host "[OK] 安装 + 注册表 + 服务(running,裸 binPath)+ named pipe + wintun 适配器 校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
