@@ -1,17 +1,18 @@
 name: build-installer
 
 on:
-  workflow_dispatch:        # 网页上手动点击触发
+  workflow_dispatch:
   push:
     tags:
-      - 'v*'                # 打 tag(如 v1.0.0)自动出包并附到 Release
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: windows-latest
+    # 固定到带 VS 2022 的镜像,匹配 CMakePresets 里的 "Visual Studio 17 2022"
+    runs-on: windows-2022
     steps:
       - name: Checkout(含子模块)
         uses: actions/checkout@v4
@@ -19,22 +20,26 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # ---------------- 1. 编译定制版 openvpn-gui(失败不致命) ----------------
+      # ---------------- 1. 编译定制 GUI(尽力而为,失败绝不影响出包) ----------------
+      #  说明:如果你已经把编译好的 GUI 提交到 installer/gui/openvpn-gui.exe,
+      #        这一步失败也无所谓,组装时会优先用那个预编译版本。
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
 
-      - name: Build openvpn-gui
+      - name: Build openvpn-gui (best-effort)
+        id: buildgui
+        continue-on-error: true          # ← 关键:这一步失败,后续照常进行
         shell: pwsh
         run: |
-          # 编译失败也继续,后面会自动退回官方 GUI,保证第一次推送就能出包
-          try {
-            cmake --preset x64
-            cmake --build --preset x64 --config Release
-          } catch {
-            Write-Warning "GUI 编译失败,将退回使用官方 openvpn-gui.exe:$($_.Exception.Message)"
+          # 你 fork 的 vcpkg.json 若缺 builtin-baseline,补上(否则 vcpkg 拒绝继续)
+          if (Test-Path vcpkg.json) {
+            & "$env:VCPKG_ROOT\vcpkg.exe" x-update-baseline --add-initial-baseline
           }
+          # 正确的 preset 名是 x64-release(不是 x64)
+          cmake --preset x64-release
+          cmake --build --preset x64-release
 
       # ---------------- 2. 取出 OpenVPN 运行时 + 探测交互服务参数 ----------------
       - name: Install OpenVPN (harvest runtime)
@@ -45,18 +50,18 @@ jobs:
         id: svc
         shell: pwsh
         run: |
-          $args = "-instance interactive ovpn"   # 默认兜底
+          $a = "-instance interactive ovpn"
           try {
             $line = (sc.exe qc OpenVPNServiceInteractive | Select-String 'BINARY_PATH_NAME')
             if ($line) {
               $m = [regex]::Match($line.ToString(), 'openvpnserv\.exe"?\s*(?<a>.*)$')
               if ($m.Success -and $m.Groups['a'].Value.Trim()) {
-                $args = $m.Groups['a'].Value.Trim().TrimEnd('"').Trim()
+                $a = $m.Groups['a'].Value.Trim().TrimEnd('"').Trim()
               }
             }
-          } catch { Write-Warning "服务参数探测失败,使用默认值" }
-          Write-Host "ServiceArgs = $args"
-          "args=$args" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          } catch { Write-Warning "服务参数探测失败,用默认值" }
+          Write-Host "ServiceArgs = $a"
+          "args=$a" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       # ---------------- 3. 组装 payload ----------------
       - name: Assemble payload
@@ -68,13 +73,21 @@ jobs:
           # 3.1 官方运行时整套(含官方 GUI 作为兜底)
           Copy-Item "C:\Program Files\OpenVPN\bin\*" $bin -Recurse -Force
 
-          # 3.2 若定制 GUI 编译成功,覆盖官方版
-          $gui = Get-ChildItem -Recurse -Path build -Filter openvpn-gui.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($gui) {
-            Copy-Item $gui.FullName "$bin\openvpn-gui.exe" -Force
-            Write-Host "[OK] 使用定制 GUI: $($gui.FullName)"
+          # 3.2 选用定制 GUI:① 优先仓库里预先提交的 ② 其次本次 CI 编译出来的 ③ 都没有用官方
+          $custom = $null
+          if (Test-Path "installer\gui\openvpn-gui.exe") {
+            $custom = "installer\gui\openvpn-gui.exe"
           } else {
-            Write-Host "[!] 未找到定制 GUI,使用官方 openvpn-gui.exe"
+            $built = Get-ChildItem -Recurse -Filter openvpn-gui.exe -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -notlike '*\payload\*' -and $_.FullName -match '\\out\\' } |
+                     Select-Object -First 1
+            if ($built) { $custom = $built.FullName }
+          }
+          if ($custom) {
+            Copy-Item $custom "$bin\openvpn-gui.exe" -Force
+            Write-Host "[OK] 使用定制 GUI: $custom"
+          } else {
+            Write-Host "[!] 未找到定制 GUI,使用官方 openvpn-gui.exe(不影响功能,仅无品牌化)"
           }
 
           # 3.3 配置文件
@@ -95,25 +108,21 @@ jobs:
         run: |
           $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF -replace 'refs/tags/v','' } else { '0.0.0-dev' }
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          # 用数组传参,避免空格/引号问题;ServiceArgs 整体作为一个参数传入
           & $iscc "/DAppVer=$ver" "/DServiceArgs=${{ steps.svc.outputs.args }}" "installer\installer.iss"
 
-      # ---------------- 5. 冒烟测试(静默装/卸,验证安装包不报错) ----------------
+      # ---------------- 5. 冒烟测试(静默装/卸) ----------------
       - name: Smoke test (silent install / uninstall)
         shell: pwsh
         run: |
-          # 先卸掉官方 OpenVPN,避免服务/注册表冲突干扰测试
           choco uninstall openvpn -y --no-progress
           $exe = Get-ChildItem "installer\Output\*.exe" | Select-Object -First 1
           Start-Process $exe.FullName "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
-          if (-not (Test-Path "C:\Program Files\JCUTVPN\bin\openvpn.exe")) { throw "安装校验失败:未找到 openvpn.exe" }
-          if (-not (Test-Path "C:\Program Files\JCUTVPN\config\JCUT-教育网.ovpn")) { throw "安装校验失败:未找到配置" }
+          if (-not (Test-Path "C:\Program Files\JCUTVPN\bin\openvpn.exe")) { throw "安装校验失败:缺 openvpn.exe" }
+          if (-not (Test-Path "C:\Program Files\JCUTVPN\config\JCUT-教育网.ovpn")) { throw "安装校验失败:缺配置" }
           Write-Host "[OK] 静默安装校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
           Write-Host "[OK] 静默卸载完成"
-        # 注意:这里只验证“能装能卸、文件到位”。真正连 VPN(要输学号密码、要能到学校服务器)
-        #       无法也不应在 CI 里做,必须由人在真实机器上测一次。
 
       # ---------------- 6. 产物 ----------------
       - name: Upload artifact
