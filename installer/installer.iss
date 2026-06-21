@@ -24,7 +24,7 @@
 #define GuiExe          "openvpn-gui.exe"
 #define OvpnConfig      "JCUT-教育网.ovpn"
 #define PayloadDir      "payload"
-#define SvcName         "JCUTVPNService"
+#define SvcName         "OpenVPNServiceInteractive"
 
 [Setup]
 AppId={{29fcf139-7be8-4080-b5e3-ab2f50568d59}
@@ -118,17 +118,29 @@ begin
   RunHidden(Format('reg add "%s" /v %s /t REG_SZ /d "%s" /f /reg:%s', [Key, Name, Data, View]));
 end;
 
+{ 写键的“默认值”(空名 @)。reg add 用 /ve 而非 /v。 }
+procedure RegSetDefault(const Key, Data, View: String);
+begin
+  RunHidden(Format('reg add "%s" /ve /t REG_SZ /d "%s" /f /reg:%s', [Key, Data, View]));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
-var Bin, Cfg, Lg, View, ServExe: String;
+var App, Bin, Cfg, Lg, View, ServExe: String;
 begin
   if CurStep = ssPostInstall then
   begin
+    App := ExpandConstant('{app}');
     Bin := ExpandConstant('{app}\bin');
     Cfg := ExpandConstant('{app}\config');
     Lg  := ExpandConstant('{app}\log');
     if Is64BitInstallMode then View := '64' else View := '32';
 
-    { ★ 修复“读取注册表值 openvpn 时发生错误”:把 GUI/服务需要的值写到与之匹配的视图 }
+    { ★ 修复“读取系统注册表值 openvpn 时发生错误”:
+      GUI 用 RegOpenKeyEx(不带 WOW64 标志)打开 HKLM\Software\OpenVPN,
+      再用 GetRegistryValue(regkey, "") 读键的【默认值】作为 install_path。
+      默认值为空或非 REG_SZ → 报 IDS_ERR_READING_REGISTRY。
+      故必须写默认值 @ = 安装目录。 }
+    RegSetDefault('HKLM\Software\OpenVPN', App, View);
     RegSet('HKLM\Software\OpenVPN', 'exe_path',         Bin + '\openvpn.exe',     View);
     RegSet('HKLM\Software\OpenVPN', 'config_dir',       Cfg,                      View);
     RegSet('HKLM\Software\OpenVPN', 'config_ext',       'ovpn',                   View);
@@ -139,7 +151,10 @@ begin
     RegSet('HKLM\Software\OpenVPN-GUI', 'exe_path',     Bin + '\openvpn.exe',     View);
     RegSet('HKLM\Software\OpenVPN-GUI', 'config_dir',   Cfg,                      View);
 
-    { 注册并启动交互服务 }
+    { 注册并启动交互服务。
+      ★ 服务名必须是 OpenVPNServiceInteractive —— GUI 硬编码查这个名
+      (service.c OPENVPN_SERVICE_NAME_OVPN2),名字对不上会提示
+      “未安装 OpenVPNServiceInteractive”。 }
     ServExe := Bin + '\openvpnserv.exe';
     RunHidden('sc create {#SvcName} binPath= "\"' + ServExe + '\" {#ServiceArgs}" start= auto DisplayName= "荆楚理工学院VPN服务"');
     RunHidden('sc start {#SvcName}');
