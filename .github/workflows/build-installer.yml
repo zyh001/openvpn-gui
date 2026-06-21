@@ -126,16 +126,15 @@ jobs:
             if (-not $d) { throw "未找到 $arch wintun.dll" }
             Copy-Item $d.FullName "$bin\wintun.dll" -Force
 
-            # 驱动文件:与 wintun.dll 同架构,在 dist\<arch>\ 下
-            $archDir = if ($arch -eq 'x64') { 'amd64' } else { 'x86' }
-            $drvSrc = Get-ChildItem $wintun -Recurse -Directory | Where-Object { $_.Name -eq $archDir -and $_.FullName -match 'dist' } | Select-Object -First 1
-            if (-not $drvSrc) { throw "未找到 $arch wintun 驱动目录(dist\$archDir)" }
+            # wintun 驱动文件(inf/cat/sys)与 wintun.dll 同目录(wintun.net 包结构:bin\<arch>\)
+            $drvDir = $d.Directory.FullName
+            Write-Host "wintun $arch 目录内容: $((Get-ChildItem $drvDir).Name -join ', ')"
             $drvDst = "$bin\..\wintun-driver"
             New-Item -ItemType Directory -Force -Path $drvDst | Out-Null
-            Copy-Item "$($drvSrc.FullName)\*" $drvDst -Force
+            Copy-Item "$drvDir\wintun.inf", "$drvDir\wintun.cat", "$drvDir\wintun.sys" $drvDst -Force -ErrorAction SilentlyContinue
             # 校验关键文件
             foreach ($f in @('wintun.inf','wintun.cat','wintun.sys')) {
-              if (-not (Test-Path "$drvDst\$f")) { throw "wintun 驱动缺少 $f" }
+              if (-not (Test-Path "$drvDst\$f")) { throw "wintun 驱动缺少 $f(目录 $drvDir 无此文件)" }
             }
             Write-Host "[OK] $arch wintun 驱动文件已放入 $drvDst"
           }
