@@ -117,12 +117,27 @@ jobs:
             }
           }
 
-          # 内部函数:从 wintun 包里取对应架构的 wintun.dll 放进 bin
+          # 内部函数:从 wintun 包里取对应架构的 wintun.dll 放进 bin,
+          # 同时把内核驱动文件(inf/cat/sys)放进 wintun-driver\<arch>\,
+          # 供安装时用 pnputil 装进驱动库(tapctl create --hwid wintun 依赖驱动已在驱动库)
           function Add-Wintun($bin, $arch) {
             $pat = if ($arch -eq 'x64') { 'amd64' } else { '\\x86\\' }
             $d = Get-ChildItem $wintun -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $pat } | Select-Object -First 1
             if (-not $d) { throw "未找到 $arch wintun.dll" }
             Copy-Item $d.FullName "$bin\wintun.dll" -Force
+
+            # 驱动文件:与 wintun.dll 同架构,在 dist\<arch>\ 下
+            $archDir = if ($arch -eq 'x64') { 'amd64' } else { 'x86' }
+            $drvSrc = Get-ChildItem $wintun -Recurse -Directory | Where-Object { $_.Name -eq $archDir -and $_.FullName -match 'dist' } | Select-Object -First 1
+            if (-not $drvSrc) { throw "未找到 $arch wintun 驱动目录(dist\$archDir)" }
+            $drvDst = "$bin\..\wintun-driver"
+            New-Item -ItemType Directory -Force -Path $drvDst | Out-Null
+            Copy-Item "$($drvSrc.FullName)\*" $drvDst -Force
+            # 校验关键文件
+            foreach ($f in @('wintun.inf','wintun.cat','wintun.sys')) {
+              if (-not (Test-Path "$drvDst\$f")) { throw "wintun 驱动缺少 $f" }
+            }
+            Write-Host "[OK] $arch wintun 驱动文件已放入 $drvDst"
           }
 
           # ---- x64(必做)----

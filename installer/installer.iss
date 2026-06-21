@@ -74,6 +74,11 @@ Source: "{#PayloadDir}\x64\bin\*"; DestDir: "{app}\bin"; Check: Is64BitInstallMo
 ; 32 位运行时(32 位安装模式时)
 Source: "{#PayloadDir}\x86\bin\*"; DestDir: "{app}\bin"; Check: not Is64BitInstallMode; Flags: recursesubdirs ignoreversion
 #endif
+; wintun 内核驱动文件(inf/cat/sys),供安装时 pnputil 装入驱动库
+Source: "{#PayloadDir}\x64\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: Is64BitInstallMode; Flags: ignoreversion
+#ifdef HaveX86
+Source: "{#PayloadDir}\x86\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: not Is64BitInstallMode; Flags: ignoreversion
+#endif
 ; 配置文件
 Source: "{#PayloadDir}\config\{#OvpnConfig}"; DestDir: "{app}\config"; Flags: ignoreversion
 #ifdef HaveIcon
@@ -175,15 +180,29 @@ end;
   并不创建适配器;交互服务(interactive.c HandleMessage)也只配置地址/路由/DNS/ring,
   不创建适配器。若无 wintun 适配器,get_tap_reg() 枚举为空 →
   “There are no TAP-Windows, Wintun or ovpn-dco adapters” 致命错误。
-  tapctl 在 bin 目录,与 openvpn.exe 同目录。 }
-procedure EnsureWintunAdapter(const Tapctl: String);
-var RC: Integer;
+  tapctl 在 bin 目录,与 openvpn.exe 同目录。
+  ★ tapctl create --hwid wintun 用 DiInstallDevice 从驱动库挑驱动(tap.c 注释明确:
+  “assumes a driver is already installed in the driver store”),故必须先 pnputil
+  装驱动。wintun.dll 是用户态库(给 ring buffer 用),不是内核驱动;内核驱动是 inf/cat/sys。 }
+procedure EnsureWintunAdapter(const App, Tapctl: String);
+var DrvDir, Inf: String;
+    RC: Integer;
 begin
-  { 已存在则跳过(tapctl create 同名会失败,忽略即可) }
+  DrvDir := App + '\wintun-driver';
+  Inf := DrvDir + '\wintun.inf';
+
+  { 1) 装入驱动库(已存在则 pnputil 跳过,/install 同时绑定) }
+  RC := RunHiddenExitCode('pnputil /add-driver "' + Inf + '" /install');
+  if RC <> 0 then
+  begin
+    { 非致命:可能驱动已在库中,继续尝试创建 }
+  end;
+
+  { 2) 创建 wintun 适配器(已存在则 tapctl create 返回非0,忽略) }
   RC := RunHiddenExitCode('"' + Tapctl + '" create --hwid wintun --name {#WintunAdapter}');
   if RC <> 0 then
   begin
-    { 可能适配器已存在(返回非0),不视为致命错误:列出确认一下 }
+    { 列出现有 wintun 适配器确认(可能 JCUTVPN 已存在) }
     RunHidden('"' + Tapctl + '" list --hwid wintun');
   end;
 end;
@@ -227,8 +246,8 @@ begin
     ServExe := Bin + '\openvpnserv.exe';
     RegisterAndStartService(ServExe);
 
-    { 预创建 wintun 适配器(openvpn 连接前必须存在) }
-    EnsureWintunAdapter(Bin + '\tapctl.exe');
+    { 预创建 wintun 适配器(先 pnputil 装驱动,再 tapctl create) }
+    EnsureWintunAdapter(App, Bin + '\tapctl.exe');
   end;
 end;
 
