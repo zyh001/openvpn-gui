@@ -81,17 +81,17 @@ Source: "app.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 #ifdef HaveIcon
-Name: "{group}\{#MyAppName}";       Filename: "{app}\bin\{#GuiExe}"; IconFilename: "{app}\app.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; IconFilename: "{app}\app.ico"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}";       Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""; IconFilename: "{app}\app.ico"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""; IconFilename: "{app}\app.ico"; Tasks: desktopicon
 #else
-Name: "{group}\{#MyAppName}";       Filename: "{app}\bin\{#GuiExe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Tasks: desktopicon
+Name: "{group}\{#MyAppName}";       Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""; Tasks: desktopicon
 #endif
 Name: "{group}\卸载 {#MyAppName}";   Filename: "{uninstallexe}"
-Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Tasks: autostart
+Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""; Tasks: autostart
 
 [Run]
-Filename: "{app}\bin\{#GuiExe}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\bin\{#GuiExe}"; Parameters: "--connect ""{#OvpnConfig}"""; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
 procedure RunHidden(const Cmd: String);
