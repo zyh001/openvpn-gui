@@ -37,8 +37,8 @@ jobs:
           if (Test-Path vcpkg.json) {
             & "$env:VCPKG_ROOT\vcpkg.exe" x-update-baseline --add-initial-baseline
           }
-          # 正确的 preset 名是 x64-release(不是 x64)
-          cmake --preset x64-release
+          # 你 fork 里 configure preset 是 x64,build preset 是 x64-release
+          cmake --preset x64
           cmake --build --preset x64-release
 
       # ---------------- 2. 取出 OpenVPN 运行时 + 探测交互服务参数 ----------------
@@ -121,12 +121,33 @@ jobs:
         shell: pwsh
         run: choco install innosetup -y --no-progress
 
+      - name: Provide Simplified Chinese language file (best-effort)
+        shell: pwsh
+        run: |
+          $target = "C:\Program Files (x86)\Inno Setup 6\Languages\ChineseSimplified.isl"
+          if (-not (Test-Path $target)) {
+            try {
+              # kira-96 维护的简体中文翻译
+              Invoke-WebRequest "https://raw.githubusercontent.com/kira-96/Inno-Setup-Chinese-Simplified-Translation/main/ChineseSimplified.isl" -OutFile $target -ErrorAction Stop
+              Write-Host "[OK] 已放入简体中文语言文件"
+            } catch {
+              Write-Warning "中文语言文件下载失败,编译时会自动回退英文界面"
+            }
+          }
+
       - name: Compile installer
         shell: pwsh
         run: |
           $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF -replace 'refs/tags/v','' } else { '0.0.0-dev' }
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          & $iscc "/DAppVer=$ver" "/DServiceArgs=${{ steps.svc.outputs.args }}" "installer\installer.iss"
+          $a = @("/DAppVer=$ver", "/DServiceArgs=${{ steps.svc.outputs.args }}", "installer\installer.iss")
+          & $iscc @a
+          if ($LASTEXITCODE -ne 0) {
+            Write-Warning "编译失败(很可能是中文语言文件不兼容),回退英文界面后重试"
+            (Get-Content installer\installer.iss) -replace 'compiler:Languages\\ChineseSimplified\.isl', 'compiler:Default.isl' | Set-Content installer\installer.iss
+            & $iscc @a
+            if ($LASTEXITCODE -ne 0) { throw "Inno 编译仍然失败" }
+          }
 
       # ---------------- 5. 冒烟测试(静默装/卸) ----------------
       - name: Smoke test (silent install / uninstall)
