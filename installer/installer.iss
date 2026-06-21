@@ -4,7 +4,7 @@
 ;
 ;  CI 传入的 /D 定义:
 ;    /DAppVer=1.0.0
-;    /DServiceArgs="-instance interactive ovpn"
+;    /DServiceArgs="-instance interactive"
 ;    /DHaveX86=1            ← 仅当成功组装出 32 位 payload 时由 CI 传入
 ; ============================================================================
 
@@ -12,7 +12,7 @@
   #define AppVer "1.0.0"
 #endif
 #ifndef ServiceArgs
-  #define ServiceArgs "-instance interactive ovpn"
+  #define ServiceArgs "-instance interactive"
 #endif
 #if FileExists("app.ico")
   #define HaveIcon
