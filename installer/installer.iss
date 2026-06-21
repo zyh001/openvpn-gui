@@ -1,22 +1,19 @@
 ; ============================================================================
-;  荆楚理工学院 VPN 客户端  —  Inno Setup 安装脚本
-;  打包:OpenVPN 运行时 + Wintun 驱动 + 交互服务 + 定制版 GUI + 配置
-;  目标:用户双击安装 -> 桌面图标 -> 打开 GUI 即可连接(只需输入统一身份账号密码)
+;  荆楚理工学院 VPN 客户端  —  Inno Setup 安装脚本(双架构 32/64 合一)
+;  打包:OpenVPN 运行时 + Wintun + 交互服务 + 定制 GUI + 配置
 ;
-;  本脚本由 .github/workflows/build-installer.yml 自动调用,可接收以下 /D 定义:
-;    /DAppVer=1.0.0                          版本号(取自 git tag)
-;    /DServiceArgs="-instance interactive ovpn"   交互服务参数(CI 自动探测)
-;  本地手动编译时不传也行,会用下面的默认值。
+;  CI 传入的 /D 定义:
+;    /DAppVer=1.0.0
+;    /DServiceArgs="-instance interactive ovpn"
+;    /DHaveX86=1            ← 仅当成功组装出 32 位 payload 时由 CI 传入
 ; ============================================================================
 
 #ifndef AppVer
   #define AppVer "1.0.0"
 #endif
-; 交互服务启动参数(CI 会自动探测并覆盖;这是兜底默认值)
 #ifndef ServiceArgs
   #define ServiceArgs "-instance interactive ovpn"
 #endif
-; 检测是否提供了图标,没有就不引用,避免编译报错
 #if FileExists("app.ico")
   #define HaveIcon
 #endif
@@ -25,10 +22,8 @@
 #define MyAppPublisher  "湖北摇光科技有限公司"
 #define MyAppURL        "https://www.jcut.edu.cn"
 #define GuiExe          "openvpn-gui.exe"
-; ↓ 配置文件名 —— 这个名字就是 GUI 托盘菜单里显示的连接名
 #define OvpnConfig      "JCUT-教育网.ovpn"
 #define PayloadDir      "payload"
-; 我们自己的交互服务名(故意区别于官方 OpenVPNServiceInteractive,卸载时只删自己的)
 #define SvcName         "JCUTVPNService"
 
 [Setup]
@@ -46,7 +41,12 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=admin
+; 有 32 位 payload 才允许在纯 32 位系统上运行;否则限定 64 位
+#ifdef HaveX86
+ArchitecturesAllowed=x86compatible
+#else
 ArchitecturesAllowed=x64compatible
+#endif
 ArchitecturesInstallIn64BitMode=x64compatible
 CloseApplications=yes
 RestartApplications=no
@@ -67,23 +67,17 @@ Name: "{app}\config"; Permissions: users-modify
 Name: "{app}\log";    Permissions: users-modify
 
 [Files]
-; OpenVPN 运行时 + Wintun 驱动 + 交互服务 + 定制 GUI(全部已在 payload\bin 里)
-Source: "{#PayloadDir}\bin\*"; DestDir: "{app}\bin"; Flags: recursesubdirs ignoreversion
+; 64 位运行时(64 位安装模式时)
+Source: "{#PayloadDir}\x64\bin\*"; DestDir: "{app}\bin"; Check: Is64BitInstallMode; Flags: recursesubdirs ignoreversion
+#ifdef HaveX86
+; 32 位运行时(32 位安装模式时)
+Source: "{#PayloadDir}\x86\bin\*"; DestDir: "{app}\bin"; Check: not Is64BitInstallMode; Flags: recursesubdirs ignoreversion
+#endif
 ; 配置文件
 Source: "{#PayloadDir}\config\{#OvpnConfig}"; DestDir: "{app}\config"; Flags: ignoreversion
 #ifdef HaveIcon
 Source: "app.ico"; DestDir: "{app}"; Flags: ignoreversion
 #endif
-
-[Registry]
-; OpenVPN GUI 通过这些键找到 openvpn.exe / 配置目录 / 日志目录
-Root: HKLM; Subkey: "Software\OpenVPN"; ValueType: string; ValueName: "exe_path";          ValueData: "{app}\bin\openvpn.exe"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\OpenVPN"; ValueType: string; ValueName: "config_dir";        ValueData: "{app}\config";          Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\OpenVPN"; ValueType: string; ValueName: "log_dir";           ValueData: "{app}\log";             Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\OpenVPN"; ValueType: string; ValueName: "priority";          ValueData: "NORMAL_PRIORITY_CLASS"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\OpenVPN"; ValueType: string; ValueName: "ovpn_admin_group";  ValueData: "OpenVPN Administrators"; Flags: uninsdeletevalue
-Root: HKLM; Subkey: "Software\OpenVPN-GUI"; ValueType: string; ValueName: "config_dir"; ValueData: "{app}\config";          Flags: uninsdeletekey
-Root: HKLM; Subkey: "Software\OpenVPN-GUI"; ValueType: string; ValueName: "exe_path";   ValueData: "{app}\bin\openvpn.exe"; Flags: uninsdeletekey
 
 [Icons]
 #ifdef HaveIcon
@@ -97,7 +91,6 @@ Name: "{group}\卸载 {#MyAppName}";   Filename: "{uninstallexe}"
 Name: "{userstartup}\{#MyAppName}"; Filename: "{app}\bin\{#GuiExe}"; Tasks: autostart
 
 [Run]
-; 安装完成后直接拉起 GUI(静默安装时跳过)
 Filename: "{app}\bin\{#GuiExe}"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [Code]
@@ -115,19 +108,40 @@ end;
 
 function InitializeSetup(): Boolean;
 begin
-  KillGui;          { 关闭可能在运行的旧 GUI }
+  KillGui;
   Result := True;
 end;
 
+{ 用 reg.exe 显式写入指定视图(64/32),绕过 Inno 默认视图可能造成的 WOW6432 重定向 }
+procedure RegSet(const Key, Name, Data, View: String);
+begin
+  RunHidden(Format('reg add "%s" /v %s /t REG_SZ /d "%s" /f /reg:%s', [Key, Name, Data, View]));
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
-var ExePath: String;
+var Bin, Cfg, Lg, View, ServExe: String;
 begin
   if CurStep = ssPostInstall then
   begin
-    ExePath := ExpandConstant('{app}\bin\openvpnserv.exe');
-    { 注册并启动交互服务。ServiceArgs 由 CI 自动探测,本地编译用默认值。 }
-    RunHidden('sc create {#SvcName} binPath= "\"' + ExePath +
-              '\" {#ServiceArgs}" start= auto DisplayName= "荆楚理工学院VPN服务"');
+    Bin := ExpandConstant('{app}\bin');
+    Cfg := ExpandConstant('{app}\config');
+    Lg  := ExpandConstant('{app}\log');
+    if Is64BitInstallMode then View := '64' else View := '32';
+
+    { ★ 修复“读取注册表值 openvpn 时发生错误”:把 GUI/服务需要的值写到与之匹配的视图 }
+    RegSet('HKLM\Software\OpenVPN', 'exe_path',         Bin + '\openvpn.exe',     View);
+    RegSet('HKLM\Software\OpenVPN', 'config_dir',       Cfg,                      View);
+    RegSet('HKLM\Software\OpenVPN', 'config_ext',       'ovpn',                   View);
+    RegSet('HKLM\Software\OpenVPN', 'log_dir',          Lg,                       View);
+    RegSet('HKLM\Software\OpenVPN', 'log_append',       '0',                      View);
+    RegSet('HKLM\Software\OpenVPN', 'priority',         'NORMAL_PRIORITY_CLASS',  View);
+    RegSet('HKLM\Software\OpenVPN', 'ovpn_admin_group', 'OpenVPN Administrators', View);
+    RegSet('HKLM\Software\OpenVPN-GUI', 'exe_path',     Bin + '\openvpn.exe',     View);
+    RegSet('HKLM\Software\OpenVPN-GUI', 'config_dir',   Cfg,                      View);
+
+    { 注册并启动交互服务 }
+    ServExe := Bin + '\openvpnserv.exe';
+    RunHidden('sc create {#SvcName} binPath= "\"' + ServExe + '\" {#ServiceArgs}" start= auto DisplayName= "荆楚理工学院VPN服务"');
     RunHidden('sc start {#SvcName}');
   end;
 end;
@@ -138,5 +152,10 @@ begin
   Exec('taskkill.exe', '/F /IM {#GuiExe}', '', SW_HIDE, ewWaitUntilTerminated, RC);
   Exec(ExpandConstant('{cmd}'), '/C sc stop {#SvcName}',   '', SW_HIDE, ewWaitUntilTerminated, RC);
   Exec(ExpandConstant('{cmd}'), '/C sc delete {#SvcName}', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  { 两个视图都清,忽略错误(前提:目标机器未同时安装官方 OpenVPN) }
+  Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN" /f /reg:64',     '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN" /f /reg:32',     '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN-GUI" /f /reg:64', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN-GUI" /f /reg:32', '', SW_HIDE, ewWaitUntilTerminated, RC);
   Result := True;
 end;
