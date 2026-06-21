@@ -201,10 +201,12 @@ jobs:
           if (-not $r) { throw "注册表校验失败:64 位视图下未找到 HKLM\Software\OpenVPN\exe_path" }
           $d = reg query "HKLM\Software\OpenVPN" /ve /reg:64 2>$null
           if (-not ($d -match 'REG_SZ')) { throw "注册表校验失败:HKLM\Software\OpenVPN 默认值 @(install_path) 未写入或非 REG_SZ" }
-          # 校验交互服务名 = OpenVPNServiceInteractive(GUI 硬编码查这个名)
+          # 校验交互服务:存在 + 正在运行(GUI 查 SERVICE_RUNNING,否则提示“未启动”)
           $svc = (Get-Service -Name OpenVPNServiceInteractive -ErrorAction SilentlyContinue)
           if (-not $svc) { throw "服务校验失败:未找到 OpenVPNServiceInteractive(GUI 会提示未安装)" }
-          Write-Host "[OK] 安装 + 注册表(exe_path/默认值)+ 服务名校验通过"
+          Write-Host "服务 binPath: $((sc.exe qc OpenVPNServiceInteractive | Select-String 'BINARY_PATH_NAME').ToString().Trim())"
+          if ($svc.Status -ne 'Running') { throw "服务校验失败:OpenVPNServiceInteractive 状态为 $($svc.Status),非 Running(GUI 会提示未启动、Wintun 无法工作)" }
+          Write-Host "[OK] 安装 + 注册表(exe_path/默认值)+ 服务(运行中)校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
 

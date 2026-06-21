@@ -124,6 +124,46 @@ begin
   RunHidden(Format('reg add "%s" /ve /t REG_SZ /d "%s" /f /reg:%s', [Key, Data, View]));
 end;
 
+{ 直接执行一个 exe(不经 cmd /C),返回退出码。 }
+function ExecWait(const Exe, Params: String): Integer;
+var RC: Integer;
+begin
+  Exec(Exe, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Result := RC;
+end;
+
+{ 注册并启动交互服务,失败则抛错中止安装。
+  binPath 形如:  "C:\...\openvpnserv.exe" -instance interactive
+  sc.exe 直接吃这个字符串作为 binPath= 的值(引号包整体,内部无嵌套引号)。 }
+procedure RegisterAndStartService(const ServExe: String);
+var BinPath, Params, Err: String;
+    RC: Integer;
+begin
+  BinPath := '"' + ServExe + '" {#ServiceArgs}';
+
+  { 若已存在(旧版残留)先删除,确保 binPath 是最新正确的 }
+  ExecWait('sc.exe', 'stop {#SvcName}');
+  ExecWait('sc.exe', 'delete {#SvcName}');
+
+  Params := 'create {#SvcName} binPath= "' + BinPath + '" start= auto DisplayName= "荆楚理工学院VPN服务"';
+  RC := ExecWait('sc.exe', Params);
+  if RC <> 0 then
+  begin
+    Err := '创建交互服务失败(sc create 返回 ' + IntToStr(RC) + ')。binPath=' + BinPath;
+    RaiseException(Err);
+  end;
+
+  { 设描述(可选,忽略错误)}
+  ExecWait('sc.exe', 'description {#SvcName} "荆楚理工学院 VPN 交互服务:代为执行需要管理员权限的网络配置"');
+
+  RC := ExecWait('sc.exe', 'start {#SvcName}');
+  if RC <> 0 then
+  begin
+    Err := '启动交互服务失败(sc start 返回 ' + IntToStr(RC) + ')。请检查 openvpnserv.exe 是否存在、binPath 是否正确。';
+    RaiseException(Err);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var App, Bin, Cfg, Lg, View, ServExe: String;
 begin
@@ -154,10 +194,14 @@ begin
     { 注册并启动交互服务。
       ★ 服务名必须是 OpenVPNServiceInteractive —— GUI 硬编码查这个名
       (service.c OPENVPN_SERVICE_NAME_OVPN2),名字对不上会提示
-      “未安装 OpenVPNServiceInteractive”。 }
+      “未安装 OpenVPNServiceInteractive”。
+      ★ binPath 必须是合法的命令行:sc.exe 要求 binPath= 后面用引号把
+      “可执行路径 + 参数”包成一个整体,且引号内不能再嵌引号。
+      直接调 sc.exe(不经 cmd /C)并把参数拆成数组式传参,避免 cmd 的
+      引号转义把 binPath 弄成畸形字符串、导致服务创建出来却启动失败
+      (表现即“未启动 OpenVPNServiceInteractive。Wintun 无法工作”)。 }
     ServExe := Bin + '\openvpnserv.exe';
-    RunHidden('sc create {#SvcName} binPath= "\"' + ServExe + '\" {#ServiceArgs}" start= auto DisplayName= "荆楚理工学院VPN服务"');
-    RunHidden('sc start {#SvcName}');
+    RegisterAndStartService(ServExe);
   end;
 end;
 
