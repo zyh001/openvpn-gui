@@ -4,7 +4,7 @@
 ;
 ;  CI 传入的 /D 定义:
 ;    /DAppVer=1.0.0
-;    /DServiceArgs="-instance interactive"
+;    /DServiceArgs=""          ← 留空:openvpnserv.exe 裸跑即默认交互服务
 ;    /DHaveX86=1            ← 仅当成功组装出 32 位 payload 时由 CI 传入
 ; ============================================================================
 
@@ -12,7 +12,7 @@
   #define AppVer "1.0.0"
 #endif
 #ifndef ServiceArgs
-  #define ServiceArgs "-instance interactive"
+  #define ServiceArgs ""
 #endif
 #if FileExists("app.ico")
   #define HaveIcon
@@ -100,6 +100,14 @@ begin
   Exec(ExpandConstant('{cmd}'), '/C ' + Cmd, '', SW_HIDE, ewWaitUntilTerminated, RC);
 end;
 
+{ 经 cmd /C 执行并返回退出码,供需要判断成功失败的调用使用。 }
+function RunHiddenExitCode(const Cmd: String): Integer;
+var RC: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'), '/C ' + Cmd, '', SW_HIDE, ewWaitUntilTerminated, RC);
+  Result := RC;
+end;
+
 procedure KillGui;
 var RC: Integer;
 begin
@@ -124,29 +132,25 @@ begin
   RunHidden(Format('reg add "%s" /ve /t REG_SZ /d "%s" /f /reg:%s', [Key, Data, View]));
 end;
 
-{ 直接执行一个 exe(不经 cmd /C),返回退出码。 }
-function ExecWait(const Exe, Params: String): Integer;
-var RC: Integer;
-begin
-  Exec(Exe, Params, '', SW_HIDE, ewWaitUntilTerminated, RC);
-  Result := RC;
-end;
-
 { 注册并启动交互服务,失败则抛错中止安装。
-  binPath 形如:  "C:\...\openvpnserv.exe" -instance interactive
-  sc.exe 直接吃这个字符串作为 binPath= 的值(引号包整体,内部无嵌套引号)。 }
+  ★ 关键:openvpnserv.exe 裸跑(不带任何参数)时默认就是交互服务
+  (service.c:dispatchTable_shared → ServiceStartInteractive),
+  named pipe 为 \\.\pipe\openvpn\service,正是 GUI 连接的路径。
+  千万不要加 -instance interactive [id] —— 那会切到“备用实例”模式,
+  pipe 变成 \\.\pipe\openvpn<id>\service,GUI 连不上 → msg_channel=0
+  → “未启动 OpenVPNServiceInteractive。Wintun 无法工作”。
+  binPath 无额外参数,只需给可执行路径加引号(路径含空格),无嵌套引号。 }
 procedure RegisterAndStartService(const ServExe: String);
-var BinPath, Params, Err: String;
+var BinPath, Err: String;
     RC: Integer;
 begin
-  BinPath := '"' + ServExe + '" {#ServiceArgs}';
+  BinPath := '"' + ServExe + '"';
 
   { 若已存在(旧版残留)先删除,确保 binPath 是最新正确的 }
-  ExecWait('sc.exe', 'stop {#SvcName}');
-  ExecWait('sc.exe', 'delete {#SvcName}');
+  RunHidden('sc stop {#SvcName}');
+  RunHidden('sc delete {#SvcName}');
 
-  Params := 'create {#SvcName} binPath= "' + BinPath + '" start= auto DisplayName= "荆楚理工学院VPN服务"';
-  RC := ExecWait('sc.exe', Params);
+  RC := RunHiddenExitCode('sc create {#SvcName} binPath= ' + BinPath + ' start= auto DisplayName= "荆楚理工学院VPN服务"');
   if RC <> 0 then
   begin
     Err := '创建交互服务失败(sc create 返回 ' + IntToStr(RC) + ')。binPath=' + BinPath;
@@ -154,9 +158,9 @@ begin
   end;
 
   { 设描述(可选,忽略错误)}
-  ExecWait('sc.exe', 'description {#SvcName} "荆楚理工学院 VPN 交互服务:代为执行需要管理员权限的网络配置"');
+  RunHidden('sc description {#SvcName} "荆楚理工学院 VPN 交互服务:代为执行需要管理员权限的网络配置"');
 
-  RC := ExecWait('sc.exe', 'start {#SvcName}');
+  RC := RunHiddenExitCode('sc start {#SvcName}');
   if RC <> 0 then
   begin
     Err := '启动交互服务失败(sc start 返回 ' + IntToStr(RC) + ')。请检查 openvpnserv.exe 是否存在、binPath 是否正确。';

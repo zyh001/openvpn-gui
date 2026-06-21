@@ -76,13 +76,15 @@ jobs:
           $wintun = "$env:RUNNER_TEMP\wintun"
           Expand-Archive $zip $wintun -Force
 
-          # 交互服务参数:openvpnserv.exe 的标准交互实例参数。
-          # 必须用默认实例(不带实例名),否则 named pipe 变成
-          # \\.\pipe\openvpn\ovpn\service,而 openvpn.exe/GUI 只认
-          # 固定的 \\.\pipe\openvpn\service,连不上服务 → msg_channel=0
-          # → 无权创建 wintun 适配器 → "no TAP/Wintun/ovpn-dco adapters"。
-          $svc = "-instance interactive"
-          Write-Host "ServiceArgs = $svc"
+          # 交互服务参数:openvpnserv.exe 裸跑(无参数)时默认就是交互服务
+          # (service.c dispatchTable_shared → ServiceStartInteractive),
+          # named pipe = \\.\pipe\openvpn\service,正是 GUI 连接的路径。
+          # 不要加 -instance interactive [id] —— 那是“备用实例”模式,pipe 变成
+          # \\.\pipe\openvpn<id>\service,GUI 连不上 → msg_channel=0 →
+          # “未启动 OpenVPNServiceInteractive。Wintun 无法工作”。
+          # 故 ServiceArgs 留空,binPath 即裸可执行路径。
+          $svc = ""
+          Write-Host "ServiceArgs = (空,openvpnserv.exe 默认交互服务)"
 
           # 缓存解包结果,供 Assemble 步骤使用
           $x64Bin | Out-File "$env:RUNNER_TEMP\x64Bin.txt" -Encoding utf8
@@ -176,7 +178,10 @@ jobs:
         run: |
           $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF -replace 'refs/tags/v','' } else { '0.0.0-dev' }
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          $a = @("/DAppVer=$ver", "/DServiceArgs=${{ steps.svc.outputs.args }}", "installer\installer.iss")
+          $a = @("/DAppVer=$ver", "installer\installer.iss")
+          # ServiceArgs 仅当非空时传入(空值时让 ISS 用默认空值,openvpnserv.exe 裸跑)
+          $svcArgs = "${{ steps.svc.outputs.args }}"
+          if ($svcArgs) { $a = @("/DServiceArgs=$svcArgs") + $a }
           if ("${{ steps.assemble.outputs.haveX86 }}" -eq "true") { $a = @("/DHaveX86=1") + $a }
           & $iscc @a
           if ($LASTEXITCODE -ne 0) {
@@ -204,9 +209,17 @@ jobs:
           # 校验交互服务:存在 + 正在运行(GUI 查 SERVICE_RUNNING,否则提示“未启动”)
           $svc = (Get-Service -Name OpenVPNServiceInteractive -ErrorAction SilentlyContinue)
           if (-not $svc) { throw "服务校验失败:未找到 OpenVPNServiceInteractive(GUI 会提示未安装)" }
-          Write-Host "服务 binPath: $((sc.exe qc OpenVPNServiceInteractive | Select-String 'BINARY_PATH_NAME').ToString().Trim())"
+          $bpLine = (sc.exe qc OpenVPNServiceInteractive | Select-String 'BINARY_PATH_NAME').ToString().Trim()
+          Write-Host "服务 binPath: $bpLine"
+          # binPath 必须是裸 openvpnserv.exe,不含 -instance
+          # (带 -instance interactive <id> 会切备用实例,pipe 路径变,GUI 连不上)
+          if ($bpLine -match '-instance') { throw "服务校验失败:binPath 含 -instance,会切到备用实例模式(GUI 连不上)。binPath=$bpLine" }
           if ($svc.Status -ne 'Running') { throw "服务校验失败:OpenVPNServiceInteractive 状态为 $($svc.Status),非 Running(GUI 会提示未启动、Wintun 无法工作)" }
-          Write-Host "[OK] 安装 + 注册表(exe_path/默认值)+ 服务(运行中)校验通过"
+          # 校验 named pipe \\.\pipe\openvpn\service 存在(服务 running 后会创建)
+          Start-Sleep -Seconds 2
+          $pipe = Get-ChildItem '\\.\pipe\' | Where-Object { $_.Name -eq 'openvpn\service' }
+          if (-not $pipe) { throw "named pipe 校验失败:未找到 \\.\pipe\openvpn\service(GUI 交互服务通道)" }
+          Write-Host "[OK] 安装 + 注册表 + 服务(running,裸 binPath)+ named pipe 校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
 
