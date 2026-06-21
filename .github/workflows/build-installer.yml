@@ -1,0 +1,129 @@
+name: build-installer
+
+on:
+  workflow_dispatch:        # 网页上手动点击触发
+  push:
+    tags:
+      - 'v*'                # 打 tag(如 v1.0.0)自动出包并附到 Release
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout(含子模块)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      # ---------------- 1. 编译定制版 openvpn-gui(失败不致命) ----------------
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build openvpn-gui
+        shell: pwsh
+        run: |
+          # 编译失败也继续,后面会自动退回官方 GUI,保证第一次推送就能出包
+          try {
+            cmake --preset x64
+            cmake --build --preset x64 --config Release
+          } catch {
+            Write-Warning "GUI 编译失败,将退回使用官方 openvpn-gui.exe:$($_.Exception.Message)"
+          }
+
+      # ---------------- 2. 取出 OpenVPN 运行时 + 探测交互服务参数 ----------------
+      - name: Install OpenVPN (harvest runtime)
+        shell: pwsh
+        run: choco install openvpn -y --no-progress
+
+      - name: Detect interactive service args
+        id: svc
+        shell: pwsh
+        run: |
+          $args = "-instance interactive ovpn"   # 默认兜底
+          try {
+            $line = (sc.exe qc OpenVPNServiceInteractive | Select-String 'BINARY_PATH_NAME')
+            if ($line) {
+              $m = [regex]::Match($line.ToString(), 'openvpnserv\.exe"?\s*(?<a>.*)$')
+              if ($m.Success -and $m.Groups['a'].Value.Trim()) {
+                $args = $m.Groups['a'].Value.Trim().TrimEnd('"').Trim()
+              }
+            }
+          } catch { Write-Warning "服务参数探测失败,使用默认值" }
+          Write-Host "ServiceArgs = $args"
+          "args=$args" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # ---------------- 3. 组装 payload ----------------
+      - name: Assemble payload
+        shell: pwsh
+        run: |
+          $bin = "installer\payload\bin"
+          New-Item -ItemType Directory -Force -Path $bin, "installer\payload\config" | Out-Null
+
+          # 3.1 官方运行时整套(含官方 GUI 作为兜底)
+          Copy-Item "C:\Program Files\OpenVPN\bin\*" $bin -Recurse -Force
+
+          # 3.2 若定制 GUI 编译成功,覆盖官方版
+          $gui = Get-ChildItem -Recurse -Path build -Filter openvpn-gui.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($gui) {
+            Copy-Item $gui.FullName "$bin\openvpn-gui.exe" -Force
+            Write-Host "[OK] 使用定制 GUI: $($gui.FullName)"
+          } else {
+            Write-Host "[!] 未找到定制 GUI,使用官方 openvpn-gui.exe"
+          }
+
+          # 3.3 配置文件
+          Copy-Item "installer\JCUT-教育网.ovpn" "installer\payload\config\" -Force
+
+          # 3.4 关键文件校验
+          foreach ($f in @("openvpn.exe","openvpnserv.exe","wintun.dll","openvpn-gui.exe")) {
+            if (-not (Test-Path "$bin\$f")) { throw "payload 缺少 $f" }
+          }
+
+      # ---------------- 4. 编译安装包 ----------------
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF -replace 'refs/tags/v','' } else { '0.0.0-dev' }
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          # 用数组传参,避免空格/引号问题;ServiceArgs 整体作为一个参数传入
+          & $iscc "/DAppVer=$ver" "/DServiceArgs=${{ steps.svc.outputs.args }}" "installer\installer.iss"
+
+      # ---------------- 5. 冒烟测试(静默装/卸,验证安装包不报错) ----------------
+      - name: Smoke test (silent install / uninstall)
+        shell: pwsh
+        run: |
+          # 先卸掉官方 OpenVPN,避免服务/注册表冲突干扰测试
+          choco uninstall openvpn -y --no-progress
+          $exe = Get-ChildItem "installer\Output\*.exe" | Select-Object -First 1
+          Start-Process $exe.FullName "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait
+          if (-not (Test-Path "C:\Program Files\JCUTVPN\bin\openvpn.exe")) { throw "安装校验失败:未找到 openvpn.exe" }
+          if (-not (Test-Path "C:\Program Files\JCUTVPN\config\JCUT-教育网.ovpn")) { throw "安装校验失败:未找到配置" }
+          Write-Host "[OK] 静默安装校验通过"
+          $unins = "C:\Program Files\JCUTVPN\unins000.exe"
+          if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
+          Write-Host "[OK] 静默卸载完成"
+        # 注意:这里只验证“能装能卸、文件到位”。真正连 VPN(要输学号密码、要能到学校服务器)
+        #       无法也不应在 CI 里做,必须由人在真实机器上测一次。
+
+      # ---------------- 6. 产物 ----------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JCUTVPN-Setup
+          path: installer\Output\*.exe
+
+      - name: Attach to Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: installer\Output\*.exe
