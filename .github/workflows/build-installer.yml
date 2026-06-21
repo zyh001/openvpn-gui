@@ -73,6 +73,24 @@ jobs:
           # 3.1 官方运行时整套(含官方 GUI 作为兜底)
           Copy-Item "C:\Program Files\OpenVPN\bin\*" $bin -Recurse -Force
 
+          # 3.1b 确保 wintun.dll 在 bin 里(choco 的 OpenVPN 包未必自带)
+          if (-not (Test-Path "$bin\wintun.dll")) {
+            $found = Get-ChildItem "C:\Program Files\OpenVPN" -Recurse -Filter wintun.dll -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Copy-Item $found.FullName "$bin\wintun.dll" -Force
+              Write-Host "[OK] 从 OpenVPN 目录取得 wintun.dll: $($found.FullName)"
+            } else {
+              Write-Host "[!] OpenVPN 未自带 wintun.dll,从 wintun.net 下载(amd64)"
+              $zip = "$env:RUNNER_TEMP\wintun.zip"
+              $dst = "$env:RUNNER_TEMP\wintun"
+              Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $zip
+              Expand-Archive $zip $dst -Force
+              $dll = Get-ChildItem $dst -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match 'amd64' } | Select-Object -First 1
+              Copy-Item $dll.FullName "$bin\wintun.dll" -Force
+              Write-Host "[OK] 已下载并放入 wintun.dll"
+            }
+          }
+
           # 3.2 选用定制 GUI:① 优先仓库里预先提交的 ② 其次本次 CI 编译出来的 ③ 都没有用官方
           $custom = $null
           if (Test-Path "installer\gui\openvpn-gui.exe") {
