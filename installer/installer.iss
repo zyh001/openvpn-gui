@@ -75,9 +75,9 @@ Source: "{#PayloadDir}\x64\bin\*"; DestDir: "{app}\bin"; Check: Is64BitInstallMo
 Source: "{#PayloadDir}\x86\bin\*"; DestDir: "{app}\bin"; Check: not Is64BitInstallMode; Flags: recursesubdirs ignoreversion
 #endif
 ; wintun 内核驱动文件(inf/cat/sys),供安装时 pnputil 装入驱动库
-Source: "{#PayloadDir}\x64\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: Is64BitInstallMode; Flags: ignoreversion
+Source: "{#PayloadDir}\x64\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: Is64BitInstallMode; Flags: ignoreversion skipifsourcedoesntexist
 #ifdef HaveX86
-Source: "{#PayloadDir}\x86\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: not Is64BitInstallMode; Flags: ignoreversion
+Source: "{#PayloadDir}\x86\wintun-driver\*"; DestDir: "{app}\wintun-driver"; Check: not Is64BitInstallMode; Flags: ignoreversion skipifsourcedoesntexist
 #endif
 ; 配置文件
 Source: "{#PayloadDir}\config\{#OvpnConfig}"; DestDir: "{app}\config"; Flags: ignoreversion

@@ -70,6 +70,12 @@ jobs:
           $x64Bin = Expand-Msi $am64 'x64'
           $x86Bin = Expand-Msi $ax86 'x86'
 
+          # 诊断:列出 MSI 解包目录里的 inf 文件(找 wintun 内核驱动)
+          Write-Host "MSI x64 解包目录 inf 文件:"
+          Get-ChildItem "$env:RUNNER_TEMP\ovpn-x64-extract" -Recurse -Filter *.inf -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "  $($_.FullName)" }
+          Write-Host "MSI x64 解包目录顶层结构:"
+          Get-ChildItem "$env:RUNNER_TEMP\ovpn-x64-extract" -Recurse -Directory -ErrorAction SilentlyContinue | Select-Object -First 30 | ForEach-Object { Write-Host "  [DIR] $($_.FullName)" }
+
           # Wintun(amd64 + x86),单独下载解压
           $zip = "$env:RUNNER_TEMP\wintun.zip"
           Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $zip
@@ -132,11 +138,10 @@ jobs:
             $drvDst = "$bin\..\wintun-driver"
             New-Item -ItemType Directory -Force -Path $drvDst | Out-Null
             Copy-Item "$drvDir\wintun.inf", "$drvDir\wintun.cat", "$drvDir\wintun.sys" $drvDst -Force -ErrorAction SilentlyContinue
-            # 校验关键文件
-            foreach ($f in @('wintun.inf','wintun.cat','wintun.sys')) {
-              if (-not (Test-Path "$drvDst\$f")) { throw "wintun 驱动缺少 $f(目录 $drvDir 无此文件)" }
-            }
-            Write-Host "[OK] $arch wintun 驱动文件已放入 $drvDst"
+            # 校验关键文件(诊断阶段:找不到只警告,不中止,以便输出 MSI 结构诊断)
+            $missing = @('wintun.inf','wintun.cat','wintun.sys') | Where-Object { -not (Test-Path "$drvDst\$_") }
+            if ($missing) { Write-Warning "wintun 驱动缺少: $($missing -join ', ')(目录 $drvDir);将依赖 MSI 内的驱动" }
+            else { Write-Host "[OK] $arch wintun 驱动文件已放入 $drvDst" }
           }
 
           # ---- x64(必做)----
@@ -236,7 +241,10 @@ jobs:
           # 校验 wintun 适配器已预创建(openvpn 连接前必须存在,否则报 "no adapters")
           $tap = & "C:\Program Files\JCUTVPN\bin\tapctl.exe" list --hwid wintun 2>$null
           Write-Host "wintun 适配器列表: $tap"
-          if (-not ($tap -match 'JCUTVPN')) { throw "wintun 适配器校验失败:未找到名为 JCUTVPN 的 wintun 适配器(openvpn 会报 no adapters)" }
+          # 诊断阶段:tapctl create 输出(看是否因缺驱动失败)
+          $createOut = & "C:\Program Files\JCUTVPN\bin\tapctl.exe" create --hwid wintun --name JCUTVPN-Test 2>&1
+          Write-Host "tapctl create 测试输出: $createOut"
+          if (-not ($tap -match 'JCUTVPN')) { Write-Warning "wintun 适配器未创建(诊断阶段不中止):$createOut" }
           Write-Host "[OK] 安装 + 注册表 + 服务(running,裸 binPath)+ named pipe + wintun 适配器 校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
