@@ -25,6 +25,7 @@
 #define OvpnConfig      "JCUT-教育网.ovpn"
 #define PayloadDir      "payload"
 #define SvcName         "OpenVPNServiceInteractive"
+#define WintunAdapter   "JCUTVPN"
 
 [Setup]
 AppId={{29fcf139-7be8-4080-b5e3-ab2f50568d59}
@@ -168,6 +169,25 @@ begin
   end;
 end;
 
+{ 确保 wintun 适配器存在:用 tapctl create --hwid wintun 预创建一个持久适配器。
+  ★ 关键:wintun 适配器必须在 openvpn 连接前就存在于系统网卡列表。
+  openvpn.exe 只“打开”已有适配器(CreateFile + 注册 ring buffer,后者经交互服务),
+  并不创建适配器;交互服务(interactive.c HandleMessage)也只配置地址/路由/DNS/ring,
+  不创建适配器。若无 wintun 适配器,get_tap_reg() 枚举为空 →
+  “There are no TAP-Windows, Wintun or ovpn-dco adapters” 致命错误。
+  tapctl 在 bin 目录,与 openvpn.exe 同目录。 }
+procedure EnsureWintunAdapter(const Tapctl: String);
+var RC: Integer;
+begin
+  { 已存在则跳过(tapctl create 同名会失败,忽略即可) }
+  RC := RunHiddenExitCode('"' + Tapctl + '" create --hwid wintun --name {#WintunAdapter}');
+  if RC <> 0 then
+  begin
+    { 可能适配器已存在(返回非0),不视为致命错误:列出确认一下 }
+    RunHidden('"' + Tapctl + '" list --hwid wintun');
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var App, Bin, Cfg, Lg, View, ServExe: String;
 begin
@@ -206,6 +226,9 @@ begin
       (表现即“未启动 OpenVPNServiceInteractive。Wintun 无法工作”)。 }
     ServExe := Bin + '\openvpnserv.exe';
     RegisterAndStartService(ServExe);
+
+    { 预创建 wintun 适配器(openvpn 连接前必须存在) }
+    EnsureWintunAdapter(Bin + '\tapctl.exe');
   end;
 end;
 
@@ -215,6 +238,8 @@ begin
   Exec('taskkill.exe', '/F /IM {#GuiExe}', '', SW_HIDE, ewWaitUntilTerminated, RC);
   Exec(ExpandConstant('{cmd}'), '/C sc stop {#SvcName}',   '', SW_HIDE, ewWaitUntilTerminated, RC);
   Exec(ExpandConstant('{cmd}'), '/C sc delete {#SvcName}', '', SW_HIDE, ewWaitUntilTerminated, RC);
+  { 删除 wintun 适配器(tapctl.exe 尚未被删,在 bin 目录);忽略错误 }
+  Exec(ExpandConstant('{cmd}'), '/C ""' + ExpandConstant('{app}\bin\tapctl.exe') + '" delete {#WintunAdapter}"', '', SW_HIDE, ewWaitUntilTerminated, RC);
   { 两个视图都清,忽略错误(前提:目标机器未同时安装官方 OpenVPN) }
   Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN" /f /reg:64',     '', SW_HIDE, ewWaitUntilTerminated, RC);
   Exec(ExpandConstant('{cmd}'), '/C reg delete "HKLM\Software\OpenVPN" /f /reg:32',     '', SW_HIDE, ewWaitUntilTerminated, RC);

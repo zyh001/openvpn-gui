@@ -219,7 +219,11 @@ jobs:
           Start-Sleep -Seconds 2
           $pipe = Get-ChildItem '\\.\pipe\' | Where-Object { $_.Name -eq 'openvpn\service' }
           if (-not $pipe) { throw "named pipe 校验失败:未找到 \\.\pipe\openvpn\service(GUI 交互服务通道)" }
-          Write-Host "[OK] 安装 + 注册表 + 服务(running,裸 binPath)+ named pipe 校验通过"
+          # 校验 wintun 适配器已预创建(openvpn 连接前必须存在,否则报 "no adapters")
+          $tap = & "C:\Program Files\JCUTVPN\bin\tapctl.exe" list --hwid wintun 2>$null
+          Write-Host "wintun 适配器列表: $tap"
+          if (-not ($tap -match 'JCUTVPN')) { throw "wintun 适配器校验失败:未找到名为 JCUTVPN 的 wintun 适配器(openvpn 会报 no adapters)" }
+          Write-Host "[OK] 安装 + 注册表 + 服务(running,裸 binPath)+ named pipe + wintun 适配器 校验通过"
           $unins = "C:\Program Files\JCUTVPN\unins000.exe"
           if (Test-Path $unins) { Start-Process $unins "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -Wait }
 
