@@ -40,10 +40,11 @@ jobs:
           cmake --preset x86
           cmake --build --preset x86-release
 
-      # ---------------- 2. OpenVPN 2.6.20 运行时(自带 wintun,x64 + x86)----------------
+      # ---------------- 2. OpenVPN 2.6.20 运行时(x64 + x86)+ Wintun ----------------
       # 说明:OpenVPN 2.7 已移除 wintun、改用 win-dco,而 win-dco 不支持
       #       AES-128-CBC(SoftEther 兼容要求),会连不上。故锁定到仍带 wintun 的 2.6.20。
-      #       官方 MSI 内已包含 wintun.dll,无需再单独下载 wintun 包。
+      # 注意:官方 MSI 解包后 bin 里并不带 wintun.dll(2.6 默认走 ovpn-dco-win),
+      #       故 wintun 单独从 wintun.net 下载,与核心二进制分别取用。
       - name: Harvest OpenVPN 2.6.20 runtimes (amd64 + x86)
         id: svc
         shell: pwsh
@@ -62,12 +63,18 @@ jobs:
             Start-Process msiexec.exe "/a `"$msi`" /qn TARGETDIR=`"$ex`"" -Wait
             $exe = Get-ChildItem $ex -Recurse -Filter openvpn.exe | Select-Object -First 1
             if (-not $exe) { throw "$tag MSI 解包后找不到 openvpn.exe" }
-            # bin 目录(openvpn.exe / openvpnserv.exe / wintun.dll 等都在此)
+            # bin 目录(openvpn.exe / openvpnserv.exe 等都在此,wintun 单独取)
             return $exe.Directory.FullName
           }
 
           $x64Bin = Expand-Msi $am64 'x64'
           $x86Bin = Expand-Msi $ax86 'x86'
+
+          # Wintun(amd64 + x86),单独下载解压
+          $zip = "$env:RUNNER_TEMP\wintun.zip"
+          Invoke-WebRequest "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $zip
+          $wintun = "$env:RUNNER_TEMP\wintun"
+          Expand-Archive $zip $wintun -Force
 
           # 交互服务参数:openvpnserv.exe 的标准交互实例参数。
           # 必须用默认实例(不带实例名),否则 named pipe 变成
@@ -80,6 +87,7 @@ jobs:
           # 缓存解包结果,供 Assemble 步骤使用
           $x64Bin | Out-File "$env:RUNNER_TEMP\x64Bin.txt" -Encoding utf8
           $x86Bin | Out-File "$env:RUNNER_TEMP\x86Bin.txt" -Encoding utf8
+          $wintun | Out-File "$env:RUNNER_TEMP\wintun.txt" -Encoding utf8
           "args=$svc" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       # ---------------- 3. 组装 payload(x64 必做,x86 尽力而为)----------------
@@ -90,6 +98,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $x64Src = (Get-Content "$env:RUNNER_TEMP\x64Bin.txt" -Raw).Trim()
           $x86Src = (Get-Content "$env:RUNNER_TEMP\x86Bin.txt" -Raw).Trim()
+          $wintun = (Get-Content "$env:RUNNER_TEMP\wintun.txt" -Raw).Trim()
 
           # 内部函数:优先用 CI 编译出来的 GUI 覆盖官方版
           function Use-CustomGui($bin, $arch) {
@@ -106,11 +115,19 @@ jobs:
             }
           }
 
+          # 内部函数:从 wintun 包里取对应架构的 wintun.dll 放进 bin
+          function Add-Wintun($bin, $arch) {
+            $pat = if ($arch -eq 'x64') { 'amd64' } else { '\\x86\\' }
+            $d = Get-ChildItem $wintun -Recurse -Filter wintun.dll | Where-Object { $_.FullName -match $pat } | Select-Object -First 1
+            if (-not $d) { throw "未找到 $arch wintun.dll" }
+            Copy-Item $d.FullName "$bin\wintun.dll" -Force
+          }
+
           # ---- x64(必做)----
           $x64 = "installer\payload\x64\bin"
           New-Item -ItemType Directory -Force -Path $x64, "installer\payload\config" | Out-Null
           Copy-Item "$x64Src\*" $x64 -Recurse -Force
-          if (-not (Test-Path "$x64\wintun.dll")) { throw "x64 payload 缺少 wintun.dll(MSI 未自带?)" }
+          Add-Wintun $x64 "x64"
           Use-CustomGui $x64 "x64"
           foreach ($f in @("openvpn.exe","openvpnserv.exe","wintun.dll","openvpn-gui.exe")) {
             if (-not (Test-Path "$x64\$f")) { throw "x64 payload 缺少 $f" }
@@ -122,7 +139,7 @@ jobs:
             $x86 = "installer\payload\x86\bin"
             New-Item -ItemType Directory -Force -Path $x86 | Out-Null
             Copy-Item "$x86Src\*" $x86 -Recurse -Force
-            if (-not (Test-Path "$x86\wintun.dll")) { throw "x86 payload 缺少 wintun.dll(MSI 未自带?)" }
+            Add-Wintun $x86 "x86"
             Use-CustomGui $x86 "x86"
             foreach ($f in @("openvpn.exe","openvpnserv.exe","wintun.dll","openvpn-gui.exe")) {
               if (-not (Test-Path "$x86\$f")) { throw "x86 payload 缺少 $f" }
